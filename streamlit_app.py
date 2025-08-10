@@ -155,11 +155,11 @@ if st.button("Run Allotment"):
         conn.close()
 
 # ----------------- RETRIEVAL SECTION -----------------
-st.subheader("📌 Data Retrieval Panel")
+st.subheader("Data Retrieval Panel")
 conn, c = init_db()
 
 with st.sidebar:
-    st.header("🔍 Filters")
+    st.header("Filters")
     years = [row[0] for row in c.execute("SELECT DISTINCT year FROM students ORDER BY year").fetchall()]
     depts = [row[0] for row in c.execute("SELECT DISTINCT department FROM students ORDER BY department").fetchall()]
     buses = [row[0] for row in c.execute("SELECT DISTINCT bus_allotted FROM students ORDER BY bus_allotted").fetchall()]
@@ -210,3 +210,4 @@ bus_summary = pd.read_sql_query("""
 
 st.dataframe(bus_summary)
 conn.close()
+
