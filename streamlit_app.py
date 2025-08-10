@@ -4,7 +4,7 @@ from fuzzywuzzy import fuzz
 import sqlite3
 import io
 
-# SQLite setup
+# ----------------- DATABASE SETUP -----------------
 def init_db():
     conn = sqlite3.connect("transport.db")
     c = conn.cursor()
@@ -31,30 +31,60 @@ def init_db():
     conn.commit()
     return conn, c
 
-# Allotment logic
-def try_allot(stop, student_id, bus_data, c, threshold=85):
-    matched_buses = []
+# ----------------- FAIR + FUZZY ALLOTMENT LOGIC -----------------
+def match_buses_by_choice(choice, bus_data, threshold):
+    matched = []
     for bus_name, bus in bus_data.items():
-        for bus_stop in bus['stops']:
-            score = fuzz.ratio(stop, bus_stop)
+        for stop in bus['stops']:
+            score = fuzz.ratio(choice, stop)
             if score >= threshold:
-                matched_buses.append((bus_name, bus_stop, score))
-                break
-    matched_buses.sort(key=lambda x: -x[2])
-    for bus_name, matched_stop, _ in matched_buses:
+                matched.append((bus_name, stop, score))
+    matched.sort(key=lambda x: -x[2])
+    return matched
+
+def try_allocate_student(student_id, choice, bus_data, c, threshold):
+    for bus_name, matched_stop, _ in match_buses_by_choice(choice, bus_data, threshold):
         if bus_data[bus_name]['seats'] > 0:
-            c.execute("UPDATE students SET bus_allotted=?, allotted_stop=? WHERE id=?",
-                      (bus_name, matched_stop, student_id))
+            c.execute("""
+                UPDATE students
+                SET bus_allotted=?, allotted_stop=?
+                WHERE id=?
+            """, (bus_name, matched_stop, student_id))
             bus_data[bus_name]['seats'] -= 1
             bus_data[bus_name]['count'] += 1
             return True
     return False
 
-# Streamlit UI
-st.set_page_config(page_title="Smart Bus Allotment System", layout="wide")
-st.title("🚌 Smart Bus Allotment System (Streamlit + SQLite)")
+def allocate_students_fair_fuzzy(c, bus_data, threshold=85):
+    students = c.execute("SELECT id, choice1, choice2 FROM students").fetchall()
 
-# File uploads
+    single_option = []
+    multi_option = []
+
+    for sid, ch1, ch2 in students:
+        buses_choice1 = match_buses_by_choice(ch1, bus_data, threshold)
+        buses_choice2 = match_buses_by_choice(ch2, bus_data, threshold)
+        total_possible = set([b[0] for b in buses_choice1] + [b[0] for b in buses_choice2])
+
+        if len(total_possible) == 1:
+            single_option.append((sid, ch1, ch2))
+        else:
+            multi_option.append((sid, ch1, ch2))
+
+    # First single-option students
+    for sid, ch1, ch2 in single_option:
+        if not try_allocate_student(sid, ch1, bus_data, c, threshold):
+            try_allocate_student(sid, ch2, bus_data, c, threshold)
+
+    # Then multi-option students
+    for sid, ch1, ch2 in multi_option:
+        if not try_allocate_student(sid, ch1, bus_data, c, threshold):
+            try_allocate_student(sid, ch2, bus_data, c, threshold)
+
+# ----------------- STREAMLIT UI -----------------
+st.set_page_config(page_title="Smart Bus Allotment System", layout="wide")
+st.title("Smart Bus Allotment System")
+
 student_file = st.file_uploader("📄 Upload Student CSV", type=["csv"])
 bus_files = st.file_uploader("📂 Upload Bus CSV Files", type=["csv"], accept_multiple_files=True)
 
@@ -102,35 +132,32 @@ if st.button("Run Allotment"):
             df['Stoppings'] = df['Stoppings'].astype(str).str.strip().str.lower()
             seats = int(df['Seats Available'].iloc[0]) if pd.notna(df['Seats Available'].iloc[0]) else 0
 
-            for stop in df['Stoppings']:
-                c.execute("INSERT INTO buses (bus_name, stoppings, seats_available) VALUES (?, ?, ?)",
-                          (bus_name, stop, seats))
+            stops_list = df['Stoppings'].tolist()
+            stops_str = ",".join(stops_list)  # store all stops in one column
+
+            # Insert only ONE row per bus
+            c.execute("INSERT INTO buses (bus_name, stoppings, seats_available) VALUES (?, ?, ?)",
+                    (bus_name, stops_str, seats))
 
             bus_data[bus_name] = {
-                'stops': df['Stoppings'].tolist(),
+                'stops': stops_list,
                 'seats': seats,
                 'count': 0
             }
 
         conn.commit()
 
-        # Allotment
-        students = c.execute("SELECT id, choice1, choice2 FROM students").fetchall()
-        for sid, ch1, ch2 in students:
-            if not try_allot(ch1, sid, bus_data, c):
-                try_allot(ch2, sid, bus_data, c)
+        # Run fair + fuzzy allotment
+        allocate_students_fair_fuzzy(c, bus_data, threshold=85)
         conn.commit()
 
-        st.success("✅ Allotment Completed!")
-
+        st.success("Allotment Completed!")
         conn.close()
 
 # ----------------- RETRIEVAL SECTION -----------------
 st.subheader("📌 Data Retrieval Panel")
-
 conn, c = init_db()
 
-# Sidebar filters
 with st.sidebar:
     st.header("🔍 Filters")
     years = [row[0] for row in c.execute("SELECT DISTINCT year FROM students ORDER BY year").fetchall()]
@@ -143,7 +170,6 @@ with st.sidebar:
     stop_filter = st.text_input("Stop Name (contains)")
     unallotted_only = st.checkbox("Show only Unallotted")
 
-# Build query dynamically
 query = "SELECT name, year, department, choice1, choice2, bus_allotted, allotted_stop FROM students WHERE 1=1"
 params = []
 
@@ -163,27 +189,24 @@ if unallotted_only:
     query += " AND bus_allotted='None'"
 
 df_filtered = pd.read_sql_query(query, conn, params=params)
-
 st.dataframe(df_filtered)
 
-# Download button
 if not df_filtered.empty:
     csv_data = io.BytesIO()
     df_filtered.to_csv(csv_data, index=False)
-    st.download_button("📥 Download Filtered Data", csv_data.getvalue(),
+    st.download_button("Download Filtered Data", csv_data.getvalue(),
                        "filtered_students.csv", "text/csv")
 
-# Bus summary
-st.subheader("🚌 Bus Capacity Summary")
+st.subheader("Bus Capacity Summary")
 bus_summary = pd.read_sql_query("""
-    SELECT bus_name,
-           MAX(seats_available) AS total_seats,
-           SUM(CASE WHEN s.bus_allotted = b.bus_name THEN 1 ELSE 0 END) AS allotted_count,
-           MAX(seats_available) - SUM(CASE WHEN s.bus_allotted = b.bus_name THEN 1 ELSE 0 END) AS remaining_seats
+    SELECT b.bus_name,
+           b.seats_available AS total_seats,
+           COUNT(s.id) AS allotted_count,
+           b.seats_available - COUNT(s.id) AS remaining_seats
     FROM buses b
     LEFT JOIN students s ON s.bus_allotted = b.bus_name
-    GROUP BY bus_name
+    GROUP BY b.bus_name
 """, conn)
-st.dataframe(bus_summary)
 
+st.dataframe(bus_summary)
 conn.close()
