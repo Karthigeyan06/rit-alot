@@ -2,4 +2,5 @@ streamlit
 pandas
 fuzzywuzzy
 python-Levenshtein
-matplotlib.pyplot
+matplotlib
+
