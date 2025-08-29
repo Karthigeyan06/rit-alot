@@ -3,6 +3,7 @@ import pandas as pd
 from fuzzywuzzy import fuzz
 import sqlite3
 import io
+import matplotlib.pyplot as plt
 
 # ----------------- DATABASE SETUP -----------------
 def init_db():
@@ -26,6 +27,15 @@ def init_db():
         bus_name TEXT,
         stoppings TEXT,
         seats_available INTEGER
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS bus_maintenance (
+        bus_name TEXT PRIMARY KEY,
+        last_diesel_filled TEXT,
+        fc_due TEXT,
+        driver_name TEXT,
+        driver_phone TEXT
     )
     """)
     conn.commit()
@@ -55,8 +65,13 @@ def try_allocate_student(student_id, choice, bus_data, c, threshold):
             return True
     return False
 
-def allocate_students_fair_fuzzy(c, bus_data, threshold=85):
-    students = c.execute("SELECT id, choice1, choice2 FROM students").fetchall()
+def allocate_students_fair_fuzzy(c, bus_data, threshold=80, specific_students=None):
+    if specific_students:
+        students = c.execute("SELECT id, choice1, choice2 FROM students WHERE id IN ({})".format(
+            ",".join(["?"]*len(specific_students))
+        ), specific_students).fetchall()
+    else:
+        students = c.execute("SELECT id, choice1, choice2 FROM students").fetchall()
 
     single_option = []
     multi_option = []
@@ -80,6 +95,10 @@ def allocate_students_fair_fuzzy(c, bus_data, threshold=85):
     for sid, ch1, ch2 in multi_option:
         if not try_allocate_student(sid, ch1, bus_data, c, threshold):
             try_allocate_student(sid, ch2, bus_data, c, threshold)
+
+    # Return list of still unallotted students
+    unallotted = [row[0] for row in c.execute("SELECT id FROM students WHERE bus_allotted='None'").fetchall()]
+    return unallotted
 
 # ----------------- STREAMLIT UI -----------------
 st.set_page_config(page_title="Smart Bus Allotment System", layout="wide")
@@ -137,7 +156,7 @@ if st.button("Run Allotment"):
 
             # Insert only ONE row per bus
             c.execute("INSERT INTO buses (bus_name, stoppings, seats_available) VALUES (?, ?, ?)",
-                    (bus_name, stops_str, seats))
+                      (bus_name, stops_str, seats))
 
             bus_data[bus_name] = {
                 'stops': stops_list,
@@ -145,18 +164,45 @@ if st.button("Run Allotment"):
                 'count': 0
             }
 
+            # Insert dummy maintenance record if not exists
+            c.execute("""
+                INSERT OR IGNORE INTO bus_maintenance (bus_name, last_diesel_filled, fc_due, driver_name, driver_phone)
+                VALUES (?, ?, ?, ?, ?)
+            """, (bus_name, "2025-08-01", "2026-01-15", "Driver A", "9876543210"))
+
         conn.commit()
 
-        # Run fair + fuzzy allotment
-        allocate_students_fair_fuzzy(c, bus_data, threshold=85)
+        # ----------------- TWO STAGE FUZZY LOGIC -----------------
+        st.subheader("Bus Allotment Results")
+
+        # First attempt at threshold = 40
+        unallotted = allocate_students_fair_fuzzy(c, bus_data, threshold=50)
+        st.info(f"ℹ️ After 50 threshold: {len(unallotted)} students still unallotted")
+
+        # Second attempt at threshold = 45 for remaining students
+        if unallotted:
+            st.write("🔄 Checking unallotted students with relaxed threshold (45)...")
+            still_unallotted = allocate_students_fair_fuzzy(c, bus_data, threshold=45, specific_students=unallotted)
+
+            if still_unallotted:
+                st.warning(f"⚠️ Still {len(still_unallotted)} students could not be allotted even at 45 threshold.")
+            else:
+                st.success("✅ All students allotted successfully after applying 45 threshold!")
+
         conn.commit()
 
-        st.success("Allotment Completed!")
+        # Update DB with remaining seats
+        for bus_name, data in bus_data.items():
+            c.execute("UPDATE buses SET seats_available=? WHERE bus_name=?", (data['seats'], bus_name))
+        conn.commit()
+
         conn.close()
 
 # ----------------- RETRIEVAL SECTION -----------------
 st.subheader("Data Retrieval Panel")
 conn, c = init_db()
+
+tab1, tab2, tab3 = st.tabs(["📄 Student Data Retrieval", "🚌 Bus Data Retrieval", "🛠 Bus Maintenance Data"])
 
 with st.sidebar:
     st.header("Filters")
@@ -170,33 +216,78 @@ with st.sidebar:
     stop_filter = st.text_input("Stop Name (contains)")
     unallotted_only = st.checkbox("Show only Unallotted")
 
-query = "SELECT name, year, department, choice1, choice2, bus_allotted, allotted_stop FROM students WHERE 1=1"
+# Common filter conditions
+filter_conditions = " WHERE 1=1"
 params = []
 
 if year_filter:
-    query += f" AND year IN ({','.join(['?']*len(year_filter))})"
+    filter_conditions += f" AND year IN ({','.join(['?']*len(year_filter))})"
     params.extend(year_filter)
 if dept_filter:
-    query += f" AND department IN ({','.join(['?']*len(dept_filter))})"
+    filter_conditions += f" AND department IN ({','.join(['?']*len(dept_filter))})"
     params.extend(dept_filter)
 if bus_filter:
-    query += f" AND bus_allotted IN ({','.join(['?']*len(bus_filter))})"
+    filter_conditions += f" AND bus_allotted IN ({','.join(['?']*len(bus_filter))})"
     params.extend(bus_filter)
 if stop_filter:
-    query += " AND allotted_stop LIKE ?"
+    filter_conditions += " AND allotted_stop LIKE ?"
     params.append(f"%{stop_filter.lower()}%")
 if unallotted_only:
-    query += " AND bus_allotted='None'"
+    filter_conditions += " AND bus_allotted='None'"
 
-df_filtered = pd.read_sql_query(query, conn, params=params)
-st.dataframe(df_filtered)
+# ----------------- Student Data Retrieval -----------------
+with tab1:
+    query_students = f"""
+        SELECT name, year, department, choice1, choice2, bus_allotted, allotted_stop
+        FROM students {filter_conditions}
+    """
+    df_students = pd.read_sql_query(query_students, conn, params=params)
+    st.dataframe(df_students)
 
-if not df_filtered.empty:
-    csv_data = io.BytesIO()
-    df_filtered.to_csv(csv_data, index=False)
-    st.download_button("Download Filtered Data", csv_data.getvalue(),
-                       "filtered_students.csv", "text/csv")
+    if not df_students.empty:
+        csv_data = io.BytesIO()
+        df_students.to_csv(csv_data, index=False)
+        csv_data.seek(0)
+        st.download_button("Download Filtered Data", csv_data, "filtered_students.csv", "text/csv")
 
+# ----------------- Bus Data Retrieval -----------------
+with tab2:
+    query_buses = f"""
+        SELECT bus_allotted, COUNT(*) as student_count
+        FROM students {filter_conditions}
+        GROUP BY bus_allotted ORDER BY bus_allotted
+    """
+    df_buses = pd.read_sql_query(query_buses, conn, params=params)
+    st.dataframe(df_buses)
+
+    # Optional bar chart
+    if not df_buses.empty:
+        show_chart = st.checkbox("Show Bar Chart", value=False)
+        if show_chart:
+            fig, ax = plt.subplots()
+            ax.bar(df_buses["bus_allotted"], df_buses["student_count"])
+            ax.set_xlabel("Bus")
+            ax.set_ylabel("Number of Students")
+            ax.set_title("Students per Bus")
+            st.pyplot(fig)
+
+# ----------------- Bus Maintenance Data -----------------
+with tab3:
+    query_maint = """
+        SELECT m.bus_name,
+               m.last_diesel_filled,
+               m.fc_due,
+               m.driver_name,
+               m.driver_phone,
+               COUNT(s.id) as students_allotted
+        FROM bus_maintenance m
+        LEFT JOIN students s ON m.bus_name = s.bus_allotted
+        GROUP BY m.bus_name
+    """
+    df_maint = pd.read_sql_query(query_maint, conn)
+    st.dataframe(df_maint)
+
+# ----------------- Bus Capacity Summary -----------------
 st.subheader("Bus Capacity Summary")
 bus_summary = pd.read_sql_query("""
     SELECT b.bus_name,
@@ -210,4 +301,3 @@ bus_summary = pd.read_sql_query("""
 
 st.dataframe(bus_summary)
 conn.close()
-
