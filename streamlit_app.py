@@ -5,7 +5,9 @@ import sqlite3
 import io
 import matplotlib.pyplot as plt
 
-# ----------------- DATABASE SETUP -----------------
+# Hey Vinissha read the comment lines to identify sections
+
+# dbside
 def init_db():
     conn = sqlite3.connect("transport.db")
     c = conn.cursor()
@@ -41,7 +43,7 @@ def init_db():
     conn.commit()
     return conn, c
 
-# ----------------- FAIR + FUZZY ALLOTMENT LOGIC -----------------
+# allotment logic
 def match_buses_by_choice(choice, bus_data, threshold):
     matched = []
     for bus_name, bus in bus_data.items():
@@ -96,16 +98,16 @@ def allocate_students_fair_fuzzy(c, bus_data, threshold=80, specific_students=No
         if not try_allocate_student(sid, ch1, bus_data, c, threshold):
             try_allocate_student(sid, ch2, bus_data, c, threshold)
 
-    # Return list of still unallotted students
+    # unallotted students
     unallotted = [row[0] for row in c.execute("SELECT id FROM students WHERE bus_allotted='None'").fetchall()]
     return unallotted
 
-# ----------------- STREAMLIT UI -----------------
+# streamlit ui
 st.set_page_config(page_title="Smart Bus Allotment System", layout="wide")
 st.title("Smart Bus Allotment System")
 
-student_file = st.file_uploader("📄 Upload Student CSV", type=["csv"])
-bus_files = st.file_uploader("📂 Upload Bus CSV Files", type=["csv"], accept_multiple_files=True)
+student_file = st.file_uploader("Upload Student CSV", type=["csv"])
+bus_files = st.file_uploader("Upload Bus CSV Files", type=["csv"], accept_multiple_files=True)
 
 if st.button("Run Allotment"):
     if not student_file or not bus_files:
@@ -113,12 +115,11 @@ if st.button("Run Allotment"):
     else:
         conn, c = init_db()
 
-        # Clear old data
         c.execute("DELETE FROM students")
         c.execute("DELETE FROM buses")
         conn.commit()
 
-        # Load student CSV
+        
         studentdata = pd.read_csv(student_file)
         required_cols = ['Name', 'Year', 'Department', 'Choice 1', 'Choice 2']
         if not all(col in studentdata.columns for col in required_cols):
@@ -164,7 +165,7 @@ if st.button("Run Allotment"):
                 'count': 0
             }
 
-            # Insert dummy maintenance record if not exists
+            # dummy data for testing
             c.execute("""
                 INSERT OR IGNORE INTO bus_maintenance (bus_name, last_diesel_filled, fc_due, driver_name, driver_phone)
                 VALUES (?, ?, ?, ?, ?)
@@ -172,14 +173,14 @@ if st.button("Run Allotment"):
 
         conn.commit()
 
-        # ----------------- TWO STAGE FUZZY LOGIC -----------------
+        # stage two logic
         st.subheader("Bus Allotment Results")
 
-        # First attempt at threshold = 40
+        # First attempt
         unallotted = allocate_students_fair_fuzzy(c, bus_data, threshold=50)
         st.info(f"ℹ️ After 50 threshold: {len(unallotted)} students still unallotted")
 
-        # Second attempt at threshold = 45 for remaining students
+       # Second attempt
         if unallotted:
             st.write("🔄 Checking unallotted students with relaxed threshold (45)...")
             still_unallotted = allocate_students_fair_fuzzy(c, bus_data, threshold=45, specific_students=unallotted)
@@ -187,7 +188,7 @@ if st.button("Run Allotment"):
             if still_unallotted:
                 st.warning(f"⚠️ Still {len(still_unallotted)} students could not be allotted even at 45 threshold.")
             else:
-                st.success("✅ All students allotted successfully after applying 45 threshold!")
+                st.success("All students allotted successfully after applying 45 threshold!")
 
         conn.commit()
 
@@ -198,7 +199,7 @@ if st.button("Run Allotment"):
 
         conn.close()
 
-# ----------------- RETRIEVAL SECTION -----------------
+# data retrieval
 st.subheader("Data Retrieval Panel")
 conn, c = init_db()
 
@@ -235,7 +236,7 @@ if stop_filter:
 if unallotted_only:
     filter_conditions += " AND bus_allotted='None'"
 
-# ----------------- Student Data Retrieval -----------------
+# student data
 with tab1:
     query_students = f"""
         SELECT name, year, department, choice1, choice2, bus_allotted, allotted_stop
@@ -250,7 +251,7 @@ with tab1:
         csv_data.seek(0)
         st.download_button("Download Filtered Data", csv_data, "filtered_students.csv", "text/csv")
 
-# ----------------- Bus Data Retrieval -----------------
+#bus data
 with tab2:
     query_buses = f"""
         SELECT bus_allotted, COUNT(*) as student_count
@@ -260,7 +261,7 @@ with tab2:
     df_buses = pd.read_sql_query(query_buses, conn, params=params)
     st.dataframe(df_buses)
 
-    # Optional bar chart
+    # bar chart
     if not df_buses.empty:
         show_chart = st.checkbox("Show Bar Chart", value=False)
         if show_chart:
@@ -271,7 +272,7 @@ with tab2:
             ax.set_title("Students per Bus")
             st.pyplot(fig)
 
-# ----------------- Bus Maintenance Data -----------------
+# bus data
 with tab3:
     query_maint = """
         SELECT m.bus_name,
@@ -287,7 +288,7 @@ with tab3:
     df_maint = pd.read_sql_query(query_maint, conn)
     st.dataframe(df_maint)
 
-# ----------------- Bus Capacity Summary -----------------
+# summary
 st.subheader("Bus Capacity Summary")
 bus_summary = pd.read_sql_query("""
     SELECT b.bus_name,
@@ -301,3 +302,4 @@ bus_summary = pd.read_sql_query("""
 
 st.dataframe(bus_summary)
 conn.close()
+
